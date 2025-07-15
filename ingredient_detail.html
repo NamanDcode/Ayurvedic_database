@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>{{ modern.title() }} - Ingredient Details</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            background-color: #f2f6fc;
+            font-family: 'Segoe UI', sans-serif;
+            padding-top: 40px;
+        }
+
+        .container {
+            max-width: 750px;
+            background: #ffffff;
+            padding: 35px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+        }
+
+        h2 {
+            color: #2c3e50;
+            font-weight: 600;
+            text-align: center;
+            margin-bottom: 15px;
+        }
+
+        h4 {
+            color: #34495e;
+            font-size: 1.25rem;
+            text-align: center;
+            margin-top: 25px;
+            margin-bottom: 15px;
+        }
+
+        ul {
+            padding-left: 0;
+        }
+
+        ul li {
+            list-style: none;
+            margin-bottom: 15px;
+            background: #f8f9fa;
+            padding: 12px 15px;
+            border-radius: 8px;
+            border-left: 4px solid #2980b9;
+        }
+
+        ul li strong {
+            color: #2c3e50;
+        }
+
+        ul ul {
+            margin-top: 10px;
+            padding-left: 20px;
+        }
+
+        ul ul li {
+            margin: 6px 0;
+            background: none;
+            padding: 0;
+            border: none;
+        }
+
+        a {
+            color: #2980b9;
+            font-weight: 500;
+            text-decoration: none;
+        }
+
+        a:hover {
+            text-decoration: underline;
+            color: #1c5980;
+        }
+
+        .btn-secondary {
+            background-color: #6c757d;
+            border: none;
+            padding: 8px 20px;
+            font-weight: 500;
+        }
+
+        .btn-secondary:hover {
+            background-color: #5a6268;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h2>{{ modern.title() }} ({{ sanskrit }})</h2>
+
+    <h4>Used In Formulations:</h4>
+    <ul>
+        {% for item in formulation_data %}
+        <li>
+            <strong>{{ item.Formulation }}</strong>
+            <ul>
+                {% for ing in item.OtherIngredients %}
+                <li>
+                    <a href="{{ ing.URL }}">{{ ing.Modern }}</a> ({{ ing.Sanskrit }})
+                </li>
+                {% endfor %}
+            </ul>
+        </li>
+        {% endfor %}
+    </ul>
+
+    <div class="text-center mt-4">
+        <a href="{{ url_for('index') }}" class="btn btn-secondary">← Back to Home</a>
+    </div>
+</div>
+</body>
+</html>

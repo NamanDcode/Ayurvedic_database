@@ -1,150 +1,90 @@
-from flask import Flask, render_template, request
+from flask import Flask, render_template, request, jsonify
+from neo4j import GraphDatabase
 import pandas as pd
 
 app = Flask(__name__)
 
+# ---------- Load Dropdown Data Only ----------
+herb_pcm_df = pd.read_excel("sample3_updated_filedb.xlsx", sheet_name="Sheet2", usecols=["Herb", "Pcs"]).dropna().head(8000)
+herbs = sorted(herb_pcm_df["Herb"].unique())
 
-df = pd.read_excel("data.xlsx")
+# ---------- Neo4j Setup ----------
+uri = "bolt://localhost:7687"
+username = "neo4j"
+password = "july1234"
+driver = GraphDatabase.driver(uri, auth=(username, password))
 
-synonym_df = pd.read_excel("sanskrit_names.xlsx", header=1)
-synonym_df['Modern Name'] = synonym_df['Modern Name'].astype(str).str.strip().str.lower()
-synonym_df['Sanskrit Name'] = synonym_df['Sanskrit Name'].astype(str).str.strip()
-
-# Clean AF-Ingredient Table
-af_ingredient_df = df[['Table 2. AF-Ingredients data', 'Unnamed: 5']].dropna()
-af_ingredient_df.columns = ['Formulation', 'Ingredient']
-af_ingredient_df = af_ingredient_df[af_ingredient_df['Formulation'] != 'AF']
-af_ingredient_df['Ingredient'] = af_ingredient_df['Ingredient'].astype(str).str.strip().str.lower()
-
-# Clean AF-Indication Table
-af_indication_df = df[['Table 3. AF-Indications data', 'Unnamed: 8']].dropna()
-af_indication_df.columns = ['Formulation', 'Indication']
-af_indication_df = af_indication_df[af_indication_df['Formulation'] != 'AF']
-
-# Clean Indication MeSH Table
-indication_mesh_df = df[['Table 5. Disease mapping', 'Unnamed: 14', 'Unnamed: 15']].dropna()
-indication_mesh_df.columns = ['Indication', 'MeSH Descriptor', 'MeSH Code']
-indication_mesh_df = indication_mesh_df[indication_mesh_df['Indication'] != 'Indication']
-
-# Create mapping 
-formulation_to_ingredients = af_ingredient_df.groupby('Formulation')['Ingredient'].apply(set).to_dict()
-formulation_to_indications = af_indication_df.groupby('Formulation')['Indication'].apply(set).to_dict()
-ingredient_to_formulations = af_ingredient_df.groupby('Ingredient')['Formulation'].apply(set).to_dict()
-indication_to_formulations = af_indication_df.groupby('Indication')['Formulation'].apply(set).to_dict()
-
-#
-all_formulations = sorted(set(af_ingredient_df['Formulation']))
-all_ingredients = sorted(set(af_ingredient_df['Ingredient']))
-all_indications = sorted(set(af_indication_df['Indication']))
-
-def get_sanskrit_name(modern_name):
-    modern_name_clean = modern_name.strip().lower()
-    match = synonym_df[synonym_df['Modern Name'] == modern_name_clean]
-    if not match.empty:
-        return match['Sanskrit Name'].values[0]
-    else:
-        fuzzy_matches = synonym_df[synonym_df['Modern Name'].str.contains(modern_name_clean, na=False)]
-        if not fuzzy_matches.empty:
-            return fuzzy_matches['Sanskrit Name'].values[0]
-        else:
-            print(f"[Unmatched Ingredient] '{modern_name}' not found in Sanskrit synonym file.")
-            return "N/A"
-
-@app.route("/", methods=["GET", "POST"])
+# ---------- Routes ----------
+@app.route("/")
 def index():
-    search_type = None
-    selected_values = []
-    results = {}
+    return render_template("index.html", herbs=herbs)
 
-    if request.method == "POST":
-        search_type = request.form.get("search_type")
-        selected_values = request.form.getlist("selected_values")
+@app.route("/get_graph", methods=["POST"])
+def get_graph():
+    data = request.get_json()
+    selected = data.get("selected")
+    graph_type = data.get("type")
 
-        if search_type == "Formulation" and selected_values:
-            formulation = selected_values[0]
-            results["Formulation"] = formulation
+    if graph_type != "herb" or not selected:
+        return jsonify({"nodes": [], "edges": [], "message": "Please select a Herb to view the graph."})
 
-            ingredients = list(formulation_to_ingredients.get(formulation, []))
-            enriched_ingredients = [{"Modern": ing, "Sanskrit": get_sanskrit_name(ing)} for ing in ingredients]
-            results["Ingredients"] = enriched_ingredients
-            results["Indications"] = list(formulation_to_indications.get(formulation, []))
+    cypher_query = """
+    MATCH (h:Herb {name: $selected})
+    OPTIONAL MATCH (h)-[:HAS_PCM]->(p:PCM)
+    OPTIONAL MATCH (p)-[:INTERACTS_WITH]->(g:Gene)
+    OPTIONAL MATCH (g)-[:GENE_ASSOCIATED_WITH]->(d:Disease)
+    OPTIONAL MATCH (g)-[:GENE_INVOLVED_IN]->(pw:Pathway)
+    RETURN h, p, g, d, pw
+    LIMIT 100
+    """
 
-        elif search_type == "Ingredient" and selected_values:
-            selected_set = set([s.strip().lower() for s in selected_values])
-            formulations_lists = [ingredient_to_formulations.get(ing, set()) for ing in selected_set]
-            common_formulations = set.intersection(*formulations_lists) if formulations_lists else set()
+    with driver.session() as session:
+        try:
+            result = session.run(cypher_query, selected=selected)
 
-            if common_formulations:
-                results["Formulations"] = []
-                for form in common_formulations:
-                    ingredients = list(formulation_to_ingredients.get(form, []))
-                    enriched_ingredients = [{
-                        "Modern": ing,
-                        "Sanskrit": get_sanskrit_name(ing),
-                        "URL": f"/ingredient/{ing}"
-                    } for ing in ingredients]
-                    results["Formulations"].append({
-                        "Formulation": form,
-                        "Ingredients": enriched_ingredients
-                    })
-                results["SelectedIngredients"] = list(selected_set)
-            else:
-                results["Message"] = "There is no formulation that contains all these ingredients."
+            nodes = {}
+            edges = []
 
-        elif search_type == "Indication" and selected_values:
-            if len(selected_values) > 5:
-                results["Error"] = "You can select a maximum of 5 indications."
-            else:
-                selected_set = set(selected_values)
-                formulations_lists = [indication_to_formulations.get(ind, set()) for ind in selected_set]
-                common_formulations = set.intersection(*formulations_lists) if formulations_lists else set()
+            def add_node(node, label, color, shape="dot"):
+                if node and node.id not in nodes:
+                    nodes[node.id] = {
+                        "id": node.id,
+                        "label": node.get("name"),
+                        "group": label,
+                        "color": color,
+                        "shape": shape
+                    }
 
-                if common_formulations:
-                    results["Formulations"] = list(common_formulations)
-                    results["SelectedIndications"] = []
-                    for ind in selected_set:
-                        row = indication_mesh_df[indication_mesh_df['Indication'] == ind]
-                        if not row.empty:
-                            desc = row['MeSH Descriptor'].values[0]
-                            code = row['MeSH Code'].values[0]
-                            results["SelectedIndications"].append({
-                                "Indication": ind,
-                                "Descriptor": desc,
-                                "Code": code
-                            })
-                else:
-                    results["Message"] = "There is no formulation that treats all the selected indications."
+            for record in result:
+                h = record.get("h")
+                p = record.get("p")
+                g = record.get("g")
+                d = record.get("d")
+                pw = record.get("pw")
 
-    return render_template(
-        "index.html",
-        search_type=search_type,
-        all_formulations=all_formulations,
-        all_ingredients=all_ingredients,
-        all_indications=all_indications,
-        selected_values=selected_values,
-        results=results
-    )
+                add_node(h, "Herb", "green")
+                add_node(p, "PCM", "orange")
+                add_node(g, "Gene", "skyblue")
+                add_node(d, "Disease", "red", "diamond")
+                add_node(pw, "Pathway", "purple", "ellipse")
 
-@app.route("/ingredient/<name>")
-def ingredient_detail(name):
-    modern_name = name.strip().lower()
-    syn_row = synonym_df[synonym_df['Modern Name'] == modern_name]
-    sanskrit = syn_row['Sanskrit Name'].values[0] if not syn_row.empty else "N/A"
+                if h and p:
+                    edges.append({"from": h.id, "to": p.id, "label": "HAS_PCM"})
+                if p and g:
+                    edges.append({"from": p.id, "to": g.id, "label": "INTERACTS_WITH"})
+                if g and d:
+                    edges.append({"from": g.id, "to": d.id, "label": "GENE_ASSOCIATED_WITH"})
+                if g and pw:
+                    edges.append({"from": g.id, "to": pw.id, "label": "GENE_INVOLVED_IN"})
 
-    formulations = ingredient_to_formulations.get(modern_name, set())
-    formulation_data = []
-    for form in formulations:
-        other_ings = formulation_to_ingredients.get(form, set()) - {modern_name}
-        enriched = [{"Modern": ing, "Sanskrit": get_sanskrit_name(ing), "URL": f"/ingredient/{ing}"} for ing in other_ings]
-        formulation_data.append({
-            "Formulation": form,
-            "OtherIngredients": enriched
-        })
+            return jsonify({
+                "nodes": list(nodes.values()),
+                "edges": edges
+            })
 
-    return render_template("ingredient_detail.html",
-                           modern=modern_name,
-                           sanskrit=sanskrit,
-                           formulation_data=formulation_data)
+        except Exception as e:
+            print("Error:", e)
+            return jsonify({"error": str(e), "message": "Something went wrong while fetching data."}), 500
 
 if __name__ == "__main__":
     app.run(debug=True)
